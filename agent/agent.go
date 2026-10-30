@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +32,7 @@ const (
 	targetDialLimit      = 10 * time.Second
 	pipeLinger           = 5 * time.Second
 	writeTimeout         = 30 * time.Second
+	refusalBodyLimit     = 1024
 )
 
 var errReplaced = errors.New(protocol.ReplacedReason)
@@ -48,7 +51,7 @@ func (a *Agent) Validate() error {
 	if _, err := protocol.ParseToken(a.Token); err != nil {
 		return fmt.Errorf("--token is not a connector token issued by Brain: %w", err)
 	}
-	if _, _, err := net.SplitHostPort(a.Target); err != nil {
+	if err := validTarget(a.Target); err != nil {
 		return fmt.Errorf("--target must be host:port: %w", err)
 	}
 	endpoint, err := url.Parse(a.Server)
@@ -63,6 +66,20 @@ func (a *Agent) Validate() error {
 		}
 	default:
 		return errors.New("--server must be a wss:// URL")
+	}
+	return nil
+}
+
+func validTarget(target string) error {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return err
+	}
+	if host == "" {
+		return errors.New("the host is empty")
+	}
+	if number, err := strconv.Atoi(port); err != nil || number < 1 || number > 65535 {
+		return fmt.Errorf("the port %q is not a number from 1 to 65535", port)
 	}
 	return nil
 }
@@ -120,10 +137,12 @@ func (a *Agent) serve(ctx context.Context) error {
 	cancel()
 	if err != nil {
 		if response != nil {
-			return fmt.Errorf("BrainData refused the tunnel with status %d", response.StatusCode)
+			return refusal(response)
 		}
 		return err
 	}
+	var streams sync.WaitGroup
+	defer streams.Wait()
 	sessionCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	stream := &closeWatcher{Conn: websocket.NetConn(sessionCtx, socket, websocket.MessageBinary)}
@@ -138,8 +157,6 @@ func (a *Agent) serve(ctx context.Context) error {
 		_ = session.Close()
 	}()
 	a.logger().Info("connected to BrainData", slog.String("target", a.Target))
-	var streams sync.WaitGroup
-	defer streams.Wait()
 	for {
 		accepted, err := session.AcceptStream()
 		if err != nil {
@@ -150,6 +167,21 @@ func (a *Agent) serve(ctx context.Context) error {
 		}
 		streams.Go(func() { a.handle(sessionCtx, accepted) })
 	}
+}
+
+func refusal(response *http.Response) error {
+	var answer struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if response.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(response.Body, refusalBodyLimit)).Decode(&answer)
+	}
+	if answer.Error.Message == "" {
+		return fmt.Errorf("BrainData refused the tunnel with status %d", response.StatusCode)
+	}
+	return fmt.Errorf("BrainData refused the tunnel with status %d: %s", response.StatusCode, answer.Error.Message)
 }
 
 func sessionConfig() *yamux.Config {

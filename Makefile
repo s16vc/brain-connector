@@ -1,7 +1,7 @@
 .PHONY: build test vet fmt tidy release image clean
 
 BIN := bin/brain-connector
-IMAGE := brain-connector:dev
+IMAGE := brain-connector:$(VERSION)
 RELEASE_TARGETS := linux/amd64 linux/arm64 windows/amd64 darwin/arm64
 VERSION ?= dev
 LDFLAGS := -s -w -X main.version=$(VERSION)

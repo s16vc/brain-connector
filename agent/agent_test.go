@@ -3,10 +3,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,27 +19,11 @@ import (
 	"github.com/coder/websocket"
 	"github.com/hashicorp/yamux"
 
+	"github.com/s16vc/brain-connector/internal/tokentest"
 	"github.com/s16vc/brain-connector/protocol"
 )
 
 const waitLimit = 10 * time.Second
-
-func testToken(t *testing.T) string {
-	t.Helper()
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nonce := make([]byte, 32)
-	_, _ = rand.Read(nonce)
-	payload, err := json.Marshal(map[string]any{"v": 1, "kid": "k1", "cid": "connection-1", "ws": "ws-1", "n": base64.RawURLEncoding.EncodeToString(nonce)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	encodedPayload := base64.RawURLEncoding.EncodeToString(payload)
-	signature := ed25519.Sign(privateKey, protocol.SigningInput(encodedPayload))
-	return protocol.TokenPrefix + encodedPayload + "." + base64.RawURLEncoding.EncodeToString(signature)
-}
 
 type acceptedTunnel struct {
 	authorization string
@@ -226,7 +206,7 @@ func echoes(t *testing.T, conn net.Conn) {
 
 func TestConnectsWithTheBearerToken(t *testing.T) {
 	brain := startBrainData(t)
-	token := testToken(t)
+	token := tokentest.Token(t)
 	runAgent(t, &Agent{Server: brain.url + "/", Token: token, Target: startEcho(t), AllowInsecure: true})
 	tunnel := brain.nextTunnel(t)
 	if tunnel.authorization != "Bearer "+token {
@@ -244,7 +224,7 @@ func TestDialsOnlyItsTarget(t *testing.T) {
 	var dialed []string
 	runAgent(t, &Agent{
 		Server:        brain.url,
-		Token:         testToken(t),
+		Token:         tokentest.Token(t),
 		Target:        echo,
 		AllowInsecure: true,
 		DialTarget: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -278,7 +258,7 @@ func TestDialsOnlyItsTarget(t *testing.T) {
 func TestReportsAnUnreachableTarget(t *testing.T) {
 	brain := startBrainData(t)
 	target := closedAddress(t)
-	runAgent(t, &Agent{Server: brain.url, Token: testToken(t), Target: target, AllowInsecure: true})
+	runAgent(t, &Agent{Server: brain.url, Token: tokentest.Token(t), Target: target, AllowInsecure: true})
 	_, status, message := brain.nextTunnel(t).request(t, target)
 	if status != protocol.StatusDialFailed || !strings.Contains(message, "could not reach "+target) {
 		t.Fatalf("reply = %d %q", status, message)
@@ -288,7 +268,7 @@ func TestReportsAnUnreachableTarget(t *testing.T) {
 func TestReconnectsAfterADrop(t *testing.T) {
 	brain := startBrainData(t)
 	echo := startEcho(t)
-	token := testToken(t)
+	token := tokentest.Token(t)
 	runAgent(t, &Agent{Server: brain.url, Token: token, Target: echo, AllowInsecure: true})
 	first := brain.nextTunnel(t)
 	first.socket.CloseNow()
@@ -307,7 +287,7 @@ func TestWaitsWhenReplacedByAnotherConnector(t *testing.T) {
 	brain := startBrainData(t)
 	logger, logs := capturedLogger()
 	replacedRetry := 2 * time.Second
-	runAgent(t, &Agent{Server: brain.url, Token: testToken(t), Target: startEcho(t), AllowInsecure: true, Logger: logger, ReplacedRetry: replacedRetry})
+	runAgent(t, &Agent{Server: brain.url, Token: tokentest.Token(t), Target: startEcho(t), AllowInsecure: true, Logger: logger, ReplacedRetry: replacedRetry})
 	first := brain.nextTunnel(t)
 	replacedAt := time.Now()
 	_ = first.socket.Close(protocol.ReplacedCloseCode, protocol.ReplacedReason)
@@ -338,7 +318,7 @@ func TestAReplacedConnectorWaitsFiveMinutesByDefault(t *testing.T) {
 
 func TestRefusesAMalformedTokenBeforeDialling(t *testing.T) {
 	brain := startBrainData(t)
-	valid := testToken(t)
+	valid := tokentest.Token(t)
 	malformed := map[string]string{
 		"empty":               "",
 		"not a token":         "x",
@@ -361,11 +341,29 @@ func TestRefusesAMalformedTokenBeforeDialling(t *testing.T) {
 	}
 }
 
+func TestLogsWhyBrainDataRefusedTheTunnel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":"unauthorized","message":"connector token: unknown kid"}}`)
+	}))
+	t.Cleanup(server.Close)
+	logger, logs := capturedLogger()
+	runAgent(t, &Agent{Server: "ws" + strings.TrimPrefix(server.URL, "http"), Token: tokentest.Token(t), Target: "db.internal:5432", AllowInsecure: true, Logger: logger})
+	eventually(t, func() bool {
+		return strings.Contains(logs.String(), "BrainData refused the tunnel with status 401: connector token: unknown kid")
+	})
+}
+
 func TestValidate(t *testing.T) {
-	token := testToken(t)
+	token := tokentest.Token(t)
 	refused := map[string]Agent{
 		"bad token":   {Server: DefaultServer, Token: "x", Target: "db:5432"},
 		"bad target":  {Server: DefaultServer, Token: token, Target: "db"},
+		"named port":  {Server: DefaultServer, Token: token, Target: "db:postgres"},
+		"no host":     {Server: DefaultServer, Token: token, Target: ":5432"},
+		"port zero":   {Server: DefaultServer, Token: token, Target: "db:0"},
+		"port 65536":  {Server: DefaultServer, Token: token, Target: "db:65536"},
 		"plain ws":    {Server: "ws://data.team-brain.com", Token: token, Target: "db:5432"},
 		"http scheme": {Server: "https://data.team-brain.com", Token: token, Target: "db:5432"},
 		"not a url":   {Server: "::", Token: token, Target: "db:5432"},
@@ -378,6 +376,7 @@ func TestValidate(t *testing.T) {
 	accepted := map[string]Agent{
 		"default server": {Server: DefaultServer, Token: token, Target: "db.internal:5432"},
 		"insecure":       {Server: "ws://127.0.0.1:8090", Token: token, Target: "db:5432", AllowInsecure: true},
+		"ipv6 target":    {Server: DefaultServer, Token: token, Target: "[fd00::5]:65535"},
 	}
 	for name, connector := range accepted {
 		if err := connector.Validate(); err != nil {

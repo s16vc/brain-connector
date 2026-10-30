@@ -16,13 +16,16 @@ docker run -d --restart unless-stopped \
 
 The image is distroless, runs as a non-root user and is published for `linux/amd64` and `linux/arm64`. `:latest` follows the newest stable release; pin a version tag such as `:0.2.0` to stay on one.
 
-Or download a binary from [Releases](https://github.com/s16vc/brain-connector/releases): `brain-connector-linux-amd64`, `brain-connector-linux-arm64`, `brain-connector-windows-amd64.exe` or `brain-connector-darwin-arm64`, plus `SHA256SUMS`. Check the download before running it:
+Or download a binary from [Releases](https://github.com/s16vc/brain-connector/releases): `brain-connector-linux-amd64`, `brain-connector-linux-arm64`, `brain-connector-windows-amd64.exe` or `brain-connector-darwin-arm64`, plus `SHA256SUMS`. Check the download against `SHA256SUMS` before running it:
 
 ```bash
-sha256sum --check --ignore-missing SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS          # Linux
+grep darwin-arm64 SHA256SUMS | shasum -a 256 --check  # macOS
 chmod +x brain-connector-linux-amd64
 BRAIN_CONNECTOR_TOKEN=bdc_... ./brain-connector-linux-amd64 --target db.internal:5432
 ```
+
+On Windows, compare `(Get-FileHash brain-connector-windows-amd64.exe -Algorithm SHA256).Hash` with its line in `SHA256SUMS`.
 
 ## Flags and environment
 
@@ -34,7 +37,7 @@ BRAIN_CONNECTOR_TOKEN=bdc_... ./brain-connector-linux-amd64 --target db.internal
 | `--insecure` | | `false` | Allows a `ws://` server address, for local testing only |
 | `--version` | | | Prints the version and exits |
 
-Prefer the environment variable for the token: a flag is visible in the process list.
+A flag wins over its environment variable. Prefer the environment variable for the token: a flag is visible in the process list.
 
 The connector logs JSON lines to stdout about the tunnel's state and refused addresses. It never logs the token or any data that passes through it.
 
@@ -48,13 +51,13 @@ The connector never accepts inbound connections and never listens on a port. To 
 
 Brain mints the token on the database connection's page and shows it once. It is signed by Brain; the connector only checks that it is well formed and sends it to BrainData, which verifies the signature before opening the tunnel. A token works for one connection in one workspace.
 
-Rotating the token on the connection page issues a new one and cuts the old connector off: from then on Brain routes that connection only to a connector holding the new token, so the old one carries nothing. Start the connector again with the new token.
+Rotating the token on the connection page issues a new one and cuts the old connector off: from then on Brain routes that connection only to a connector holding the new token, so the old one carries nothing. Stop the old connector and start it again with the new token.
 
 ## Two connectors on one token
 
 One token holds one tunnel. When a second connector connects with the same token, BrainData keeps the newer tunnel and closes the older one with the reason `replaced by another connector with the same token`. The connector that was replaced logs that sentence and waits 5 minutes before it connects again, so two copies started with one token take turns every 5 minutes instead of evicting each other every second. Run one connector per token.
 
-After any other disconnect the connector reconnects on its own with a jittered backoff from 1 to 60 seconds.
+After any other disconnect the connector reconnects on its own: the first retry comes within a second, and the wait doubles up to a minute, with jitter.
 
 ## Build and test
 

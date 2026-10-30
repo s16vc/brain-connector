@@ -60,7 +60,7 @@ jobs:
         run: go test -race -count=1 ./...
 
   binaries:
-    needs: [version, test]
+    needs: [version, test, image]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

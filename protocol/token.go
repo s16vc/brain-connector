@@ -50,7 +50,7 @@ func (t Token) SigningInput() []byte {
 }
 
 func ParseToken(token string) (Token, error) {
-	if len(token) > MaxTokenLength {
+	if len(token) > MaxTokenLength || strings.ContainsAny(token, "\r\n") {
 		return Token{}, ErrTokenMalformed
 	}
 	body, found := strings.CutPrefix(token, TokenPrefix)

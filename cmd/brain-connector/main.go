@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -16,46 +17,53 @@ import (
 var version = "dev"
 
 func main() {
+	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
+}
+
+func run(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("brain-connector", flag.ContinueOnError)
-	token := flags.String("token", os.Getenv("BRAIN_CONNECTOR_TOKEN"), "connector token from Brain (or BRAIN_CONNECTOR_TOKEN)")
-	target := flags.String("target", os.Getenv("BRAIN_CONNECTOR_TARGET"), "the database host:port this connector may reach (or BRAIN_CONNECTOR_TARGET)")
-	server := flags.String("server", envOr("BRAIN_CONNECTOR_SERVER", agent.DefaultServer), "BrainData address (or BRAIN_CONNECTOR_SERVER)")
+	flags.SetOutput(stderr)
+	token := flags.String("token", "", "connector token from Brain (or BRAIN_CONNECTOR_TOKEN)")
+	target := flags.String("target", "", "the database host:port this connector may reach (or BRAIN_CONNECTOR_TARGET)")
+	server := flags.String("server", "", "BrainData address (or BRAIN_CONNECTOR_SERVER, default "+agent.DefaultServer+")")
 	insecure := flags.Bool("insecure", false, "allow a ws:// server address, for local testing only")
 	showVersion := flags.Bool("version", false, "print the version and exit")
-	if err := flags.Parse(os.Args[1:]); err != nil {
+	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return
+			return 0
 		}
-		os.Exit(2)
+		return 2
 	}
 	if *showVersion {
-		fmt.Println(version)
-		return
+		fmt.Fprintln(stdout, version)
+		return 0
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(slog.String("version", version))
 	connector := &agent.Agent{
-		Server:        *server,
-		Token:         *token,
-		Target:        *target,
+		Server:        firstSet(*server, getenv("BRAIN_CONNECTOR_SERVER"), agent.DefaultServer),
+		Token:         firstSet(*token, getenv("BRAIN_CONNECTOR_TOKEN")),
+		Target:        firstSet(*target, getenv("BRAIN_CONNECTOR_TARGET")),
 		AllowInsecure: *insecure,
-		Logger:        logger,
+		Logger:        slog.New(slog.NewJSONHandler(stdout, nil)).With(slog.String("version", version)),
 	}
 	if err := connector.Validate(); err != nil {
-		fmt.Fprintln(os.Stderr, "brain-connector:", err)
-		os.Exit(2)
+		fmt.Fprintln(stderr, "brain-connector:", err)
+		return 2
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	logger.Info("brain-connector starting", slog.String("server", *server), slog.String("target", *target))
+	connector.Logger.Info("brain-connector starting", slog.String("server", connector.Server), slog.String("target", connector.Target))
 	if err := connector.Run(ctx); err != nil {
-		logger.Error("brain-connector stopped", slog.String("error", err.Error()))
-		os.Exit(1)
+		connector.Logger.Error("brain-connector stopped", slog.String("error", err.Error()))
+		return 1
 	}
+	return 0
 }
 
-func envOr(name, fallback string) string {
-	if value := os.Getenv(name); value != "" {
-		return value
+func firstSet(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
 	}
-	return fallback
+	return ""
 }
