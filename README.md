@@ -75,3 +75,10 @@ A tag `vX.Y.Z` (or `vX.Y.Z-rc.N` for a pre-release) runs the tests, publishes th
 - `protocol`: the wire format shared with BrainData: the stream header, reply statuses, the close code for a replaced connector, and the structural check of a connector token.
 - `agent`: the connector itself.
 - `cmd/brain-connector`: the binary.
+
+## License
+
+Apache License 2.0 with the Commons Clause condition (see `LICENSE`). You may
+run brain-connector for any purpose, including inside your business, change it
+and share it. You may not sell it: no charging for brain-connector itself, or for
+a product or service whose value comes entirely or substantially from it.
